@@ -1,4 +1,3 @@
-# TODO: Implement wall_follower
 """
 MIT BWSI Autonomous RACECAR
 MIT License
@@ -58,7 +57,7 @@ rc = racecar_core.create_racecar()
 speed=0
 angle=0
 
-kp = 0.005
+kp = 0.006
 kd = 0.005
 prev_error = 0.0
 prev_time = 0.0
