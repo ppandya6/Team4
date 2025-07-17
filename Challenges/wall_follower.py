@@ -1,7 +1,5 @@
 # TODO: Implement wall_follower
 
-=======
-=======
 """
 MIT BWSI Autonomous RACECAR
 MIT License
