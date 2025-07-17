@@ -3,15 +3,16 @@ MIT BWSI Autonomous RACECAR
 MIT License
 racecar-neo-prereq-labs
 
-File Name: Lab H
+File Name: lab_f.py
 
-Title: Cone Slalom
+Title: Lab F - Line Follower
 
-Author: Matthew Liong
+Author: Team 4
 
-Purpose: Navigate through a system of cones, going to the right of red cones and to the left of blue ones
-
-Expected Outcome: Weave through the cones without collision
+Purpose: Write a script to enable fully autonomous behavior from the RACECAR. The
+RACECAR should automatically identify the color of a line it sees, then drive on the
+center of the line throughout the obstacle course. The RACECAR should also identify
+color changes, following colors with higher priority than others.
 """
 
 ########################################################################################
@@ -19,151 +20,163 @@ Expected Outcome: Weave through the cones without collision
 ########################################################################################
 
 import sys
+import cv2 as cv
+import numpy as np
 
-# If this file is nested inside a folder in the labs folder, the relative path should
-# be [1, ../../library] instead.
-sys.path.insert(1, '../../library')
+sys.path.insert(1, "../../library")
 import racecar_core
 import racecar_utils as rc_utils
-import cv2 as cv
-import time
+
 ########################################################################################
 # Global variables
 ########################################################################################
 
 rc = racecar_core.create_racecar()
 
-MIN_CONTOUR_AREA = 100
+# Constants
+MIN_CONTOUR_AREA = 80
+CROP_FLOOR = ((10, 0), (480, rc.camera.get_width()))
 
+#GREEN = ((27, 84, 184), (90, 250, 255))
+ORANGE = ((1, 1, 1), (7, 225, 225))
+BLUE = ((98, 126, 1), (104, 255, 255))
 
-# Declare any global variables here
-speed=0
-angle=0
-
-contour_center = None  # The (pixel row, pixel column) of contour
-contour_area = 0  # The area of contour
-
-BLUE = ((90, 100, 100), (120, 255, 255))  # The HSV range for the color blue
-RED1 = ((0,50,50),(10,255,255))  #Lower red HSV range
-RED2 = ((170,50,50),(180,255,255)) #Higher red HSV range
-
-color=''
-
-MIN_DISTANCE=175
-
-state=0
-
-turning=0
-
-queue=[]
-
-last_color=None
-
-lost_start_time = None
-scan_direction = 1  # 1 = turn right, -1 = turn left
+# Variables
+speed = 0.0
+angle = 0.0
+contour_center = None
+contour_area = 0
+color_name = None
+kp = 0.0005
+kd = 0.00001  # Derivative gain
+last_angle = 0
+last_error = 0
+setpoint = 0
+time = 0
 ########################################################################################
 # Functions
 ########################################################################################
 
-# [FUNCTION] The start function is run once every time the start button is pressed
-def start():
-    pass # Remove 'pass' and write your source code for the start() function here
 def update_contour():
-    global contour_area
-    global contour_center
-    global largest_contour_area 
-    global largest_contour
-    global speed
-    global angle 
-    global color
+    global contour_center, contour_area, color_name, kp
 
-    largest_contour_area=0
-    largest_contour=None
-
-    color=''
-
-    image=rc.camera.get_color_image()
-    image=cv.cvtColor(image,cv.COLOR_BGR2HSV)
-    image = rc_utils.crop(image, (180,0), (rc.camera.get_height(),rc.camera.get_width()))
-
+    image = rc.camera.get_color_image()
     if image is None:
-        contour_area=0
+        contour_center = None
+        contour_area = 0
+        return
+
+    image = rc_utils.crop(image, CROP_FLOOR[0], CROP_FLOOR[1])
+
+    blue_contours = rc_utils.find_contours(image, BLUE[0], BLUE[1])
+    blue = rc_utils.get_largest_contour(blue_contours, MIN_CONTOUR_AREA)
+    blue_area = rc_utils.get_contour_area(blue) if blue is not None else 0
+
+    orange_contours = rc_utils.find_contours(image, ORANGE[0], ORANGE[1])
+    orange = rc_utils.get_largest_contour(orange_contours, MIN_CONTOUR_AREA)
+    orange_area = rc_utils.get_contour_area(orange) if orange is not None else 0
+
+    if blue_area > orange_area and blue_area > 0:
+        contour_center = rc_utils.get_contour_center(blue)
+        contour_area = blue_area
+        rc_utils.draw_contour(image, blue)
+        rc_utils.draw_circle(image, contour_center)
+        color_name = "blue"
+    elif orange_area > 0:
+        contour_center = rc_utils.get_contour_center(orange)
+        contour_area = orange_area
+        rc_utils.draw_contour(image, orange)
+        rc_utils.draw_circle(image, contour_center)
+        color_name = "orange"
     else:
-        red_mask1=cv.inRange(image,RED1[0],RED1[1])
-        red_mask2=cv.inRange(image,RED2[0],RED2[1])
-        red_mask=red_mask1 | red_mask2 #combines the two masks, for the upper and lower bounds of red HSV
-        blue_mask=cv.inRange(image,BLUE[0],BLUE[1])
+        contour_center = None
+        contour_area = 0
 
-        
-        
-        red_contours,_=cv.findContours(red_mask,cv.RETR_LIST,cv.CHAIN_APPROX_SIMPLE)
-        blue_contours,_=cv.findContours(blue_mask,cv.RETR_LIST,cv.CHAIN_APPROX_SIMPLE)
+    rc.display.show_color_image(image)
 
-        for contour in red_contours:
-                if cv.contourArea(contour)>largest_contour_area:
-                    largest_contour_area=cv.contourArea(contour)
-                    largest_contour=contour
-                    if largest_contour_area>MIN_CONTOUR_AREA:
-                        color='RED'
+def start():
+    global speed, angle
 
-        for contour in blue_contours:
-                if cv.contourArea(contour)>largest_contour_area:
-                    largest_contour_area=cv.contourArea(contour)
-                    largest_contour=contour
-                    if largest_contour_area>MIN_CONTOUR_AREA:
-                        color='BLUE'
+    speed = 0
+    angle = 0
+    rc.drive.set_speed_angle(speed, angle)
+    rc.set_update_slow_time(0.5)
 
-    try:
-        contour_center = rc_utils.get_contour_center(largest_contour)
-        rc_utils.draw_circle(image,contour_center)
-    except:
-        pass
-    rc.display.show_color_image(red_mask)
+    print(
+        ">> Lab 2A - Color Image Line Following\n"
+        "\n"
+        "Controls:\n"
+        "   Right trigger = accelerate forward\n"
+        "   Left trigger = accelerate backward\n"
+        "   A button = print current speed and angle\n"
+        "   B button = print contour center and area"
+    )
 
-# [FUNCTION] After start() is run, this function is run once every frame (ideally at
-# 60 frames per second or slower depending on processing speed) until the back button
-# is pressed  
 def update():
-    global speed
-    global angle
-    global turning
-    update_contour()
-    speed=1
+    global speed, angle, last_angle, kd, last_error, setpoint, time
     scan = rc.lidar.get_samples()
+    right_distance = rc_utils.get_lidar_average_distance(scan, 90, 5)
+    left_distance = rc_utils.get_lidar_average_distance(scan, -90, 5)
+    front = rc_utils.get_lidar_average_distance(scan, 0, 2)
+    print("Front", front)
+    update_contour()
 
-    #closestDistance=float('inf')
-    #closestAngle=None
-    closestAngle, closestDistance = rc_utils.get_lidar_closest_point(scan)
+    if contour_center is not None and front < 1010:
+        print(front)
+        if color_name == "blue":
+            print("blue")
+            setpoint = 3*(rc.camera.get_width() / 4)
+            if right_distance > 25:
+                angle = -0.8
+        elif color_name == "orange":
+            print("orange")
+            setpoint = rc.camera.get_width()
+            if left_distance > 25:
+                angle = 0.8
+            
+        
+        present_value = contour_center[1]
+        error = -(setpoint - present_value)
 
-    if color=='RED' and closestDistance<100:
-        angle=1
-        turning=1
-    elif color=='RED' and closestDistance>250 and turning==1:
-         angle=-0.5
-         turning=0
-    elif color=='RED' and turning==1:
-         angle=0
+        dt = rc.get_delta_time()
+        time += dt
+        if dt == 0:
+            dt = 1e-3
 
+        derivative = (error - last_error) / time
+        last_error = error
 
+        angle = -(kp * error + kd * derivative)
+        angle = rc_utils.clamp(angle, -1, 1)
+        print(f"[PD] Error: {error}, Derivative: {derivative:.2f}, Angle: {angle:.2f}")
 
+        last_angle = -angle
+    else:
+        print("Lost contour — holding last angle")
+        angle = -(last_angle * 0.9)  # mild decay
 
-    elif color=='BLUE' and closestAngle >= 60 and closestAngle >= 180:
-        angle=-1
-        turning=1
-    elif color=='BLUE' and closestAngle <= 300 and closestAngle >= 180 and turning == 1:
-         angle=0.5
-         turning=0
-    print(rc_utils.get_lidar_closest_point(scan,(-90,-10))[0])
-
+    speed = 0.67
     rc.drive.set_speed_angle(speed, angle)
 
+    if rc.controller.is_down(rc.controller.Button.A):
+        print("Speed:", speed, "Angle:", angle)
 
-# [FUNCTION] update_slow() is similar to update() but is called once per second by
-# default. It is especially useful for printing debug messages, since printing a 
-# message every frame in update is computationally expensive and creates clutter
+    if rc.controller.is_down(rc.controller.Button.B):
+        if contour_center is None:
+            print("No contour found")
+        else:
+            print("Center:", contour_center, "Area:", contour_area)
+
 def update_slow():
-    pass # Remove 'pass and write your source code for the update_slow() function here
-
+    if rc.camera.get_color_image() is None:
+        print("X" * 10 + " (No image) " + "X" * 10)
+    else:
+        if contour_center is None:
+            print("-" * 32 + " : area = " + str(contour_area))
+        else:
+            s = ["-"] * 32
+            s[int(contour_center[1] / 20)] = "|"
+            print("".join(s) + " : area = " + str(contour_area))
 
 ########################################################################################
 # DO NOT MODIFY: Register start and update and begin execution
