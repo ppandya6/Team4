@@ -16,7 +16,7 @@ class CompFilterNode(Node):
         self.publisher_attitude = self.create_publisher(Vector3, '/attitude', 10) # output as [roll, pitch, yaw] angles
 
         self.prev_time = self.get_clock().now() # initialize time checkpoint
-        self.alpha = 0.98  # Typical value between 0.95–0.99 for complementary filter
+        self.alpha = 0.95  # Typical value between 0.95–0.99 for complementary filter
 
         # set up attitude params
         self.roll = 0.0
