@@ -1,187 +1,140 @@
-"""
-MIT BWSI Autonomous RACECAR
-MIT License
-racecar-neo-prereq-labs
+# lab_h/cone_slalom_lidar_state.py
+#
+# Color-aware cone-slalom controller (camera only)
 
-File Name: lab_f.py
-
-Title: Lab F - Line Follower
-
-Author: Team 4
-
-Purpose: Write a script to enable fully autonomous behavior from the RACECAR. The
-RACECAR should automatically identify the color of a line it sees, then drive on the
-center of the line throughout the obstacle course. The RACECAR should also identify
-color changes, following colors with higher priority than others.
-"""
-
-########################################################################################
-# Imports
-########################################################################################
-
-import sys
-import cv2 as cv
-import numpy as np
-
+import sys, cv2 as cv, numpy as np
 sys.path.insert(1, "../../library")
-import racecar_core
-import racecar_utils as rc_utils
+import racecar_core, racecar_utils as rc_utils
 
-########################################################################################
-# Global variables
-########################################################################################
+# ──────────────── CONFIG ────────────────
+# HSV ranges for red and blue cones
+RED_LO1, RED_HI1 = (0,   120,  70), (10, 255, 255)       # low red
+RED_LO2, RED_HI2 = (170, 120,  70), (180,255, 255)       # high red (wrap)
+BLUE_LO, BLUE_HI = (100, 150,   0), (140,255, 255)
 
+MIN_AREA_PX   = 30        # ignore tiny blobs
+CENTER_SHIFT_PX = 10     # positive value; we’ll decide sign later
+DESIRED_H       = 100      # pick ~h when the cone is at the “pass” distance
+PASS_H          = 150      # if h gets this big we consider the cone passed
+K_STEER         = 0.7      # 4.0 was clipping to ±1 too early
+K_SPEED         = 0.051     # keeps speed moderate
+time = 0
+queue = []  # driving queue, not used in this lab
+# ──────────────── setup ────────────────
 rc = racecar_core.create_racecar()
 
-# Constants
-MIN_CONTOUR_AREA = 80
-CROP_FLOOR = ((10, 0), (480, rc.camera.get_width()))
+# ────────── helper: contour extractor ──────────
+def find_color_contours(hsv, lo1, hi1, lo2=None, hi2=None):
+    mask = cv.inRange(hsv, lo1, hi1)
+    if lo2 is not None:
+        mask |= cv.inRange(hsv, lo2, hi2)
+    mask = cv.erode(mask, None, iterations=2)
+    mask = cv.dilate(mask, None, iterations=2)
+    cnts, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    return [c for c in cnts if cv.contourArea(c) > MIN_AREA_PX]
 
-#GREEN = ((27, 84, 184), (90, 250, 255))
-ORANGE = ((1, 1, 1), (7, 225, 225))
-BLUE = ((98, 126, 1), (104, 255, 255))
-
-# Variables
-speed = 0.0
-angle = 0.0
-contour_center = None
-contour_area = 0
-color_name = None
-kp = 0.0005
-kd = 0.00001  # Derivative gain
-last_angle = 0
-last_error = 0
-setpoint = 0
-time = 0
-########################################################################################
-# Functions
-########################################################################################
-
-def update_contour():
-    global contour_center, contour_area, color_name, kp
-
-    image = rc.camera.get_color_image()
-    if image is None:
-        contour_center = None
-        contour_area = 0
-        return
-
-    image = rc_utils.crop(image, CROP_FLOOR[0], CROP_FLOOR[1])
-
-    blue_contours = rc_utils.find_contours(image, BLUE[0], BLUE[1])
-    blue = rc_utils.get_largest_contour(blue_contours, MIN_CONTOUR_AREA)
-    blue_area = rc_utils.get_contour_area(blue) if blue is not None else 0
-
-    orange_contours = rc_utils.find_contours(image, ORANGE[0], ORANGE[1])
-    orange = rc_utils.get_largest_contour(orange_contours, MIN_CONTOUR_AREA)
-    orange_area = rc_utils.get_contour_area(orange) if orange is not None else 0
-
-    if blue_area > orange_area and blue_area > 0:
-        contour_center = rc_utils.get_contour_center(blue)
-        contour_area = blue_area
-        rc_utils.draw_contour(image, blue)
-        rc_utils.draw_circle(image, contour_center)
-        color_name = "blue"
-    elif orange_area > 0:
-        contour_center = rc_utils.get_contour_center(orange)
-        contour_area = orange_area
-        rc_utils.draw_contour(image, orange)
-        rc_utils.draw_circle(image, contour_center)
-        color_name = "orange"
-    else:
-        contour_center = None
-        contour_area = 0
-
-    rc.display.show_color_image(image)
-
+# ─────────── lifecycle callbacks ───────────
 def start():
-    global speed, angle
-
-    speed = 0
-    angle = 0
-    rc.drive.set_speed_angle(speed, angle)
-    rc.set_update_slow_time(0.5)
-
-    print(
-        ">> Lab 2A - Color Image Line Following\n"
-        "\n"
-        "Controls:\n"
-        "   Right trigger = accelerate forward\n"
-        "   Left trigger = accelerate backward\n"
-        "   A button = print current speed and angle\n"
-        "   B button = print contour center and area"
-    )
+    print("Cone-slalom controller ready.")
 
 def update():
-    global speed, angle, last_angle, kd, last_error, setpoint, time
-    scan = rc.lidar.get_samples()
-    right_distance = rc_utils.get_lidar_average_distance(scan, 90, 5)
-    left_distance = rc_utils.get_lidar_average_distance(scan, -90, 5)
-    front = rc_utils.get_lidar_average_distance(scan, 0, 2)
-    print("Front", front)
-    update_contour()
+    global time, K_SPEED, K_STEER, RED_LO1, RED_HI1, RED_LO2, RED_HI2, BLUE_LO, BLUE_HI, MIN_AREA_PX, CENTER_SHIFT_PX, DESIRED_H, PASS_H
+    frame = rc.camera.get_color_image()
+    if frame is None:
+        return
+    
+    hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
 
-    if contour_center is not None and front < 1010:
-        print(front)
-        if color_name == "blue":
-            print("blue")
-            setpoint = 3*(rc.camera.get_width() / 4)
-            if right_distance > 25:
-                angle = -0.8
-        elif color_name == "orange":
-            print("orange")
-            setpoint = rc.camera.get_width()
-            if left_distance > 25:
-                angle = 0.8
-            
+    # ---------- masks ----------
+    mask_red  = cv.inRange(hsv, RED_LO1, RED_HI1) | cv.inRange(hsv, RED_LO2, RED_HI2)
+    mask_blue = cv.inRange(hsv, BLUE_LO,  BLUE_HI)
+
+    # ---------- find contours ----------
+    reds  = find_color_contours(hsv, RED_LO1, RED_HI1, RED_LO2, RED_HI2)
+    blues = find_color_contours(hsv, BLUE_LO,  BLUE_HI)
+
+    # ---------- pick target ----------
+    if reds:
+        target, color = max(reds, key=cv.contourArea), "red"
         
-        present_value = contour_center[1]
-        error = -(setpoint - present_value)
-
-        dt = rc.get_delta_time()
-        time += dt
-        if dt == 0:
-            dt = 1e-3
-
-        derivative = (error - last_error) / time
-        last_error = error
-
-        angle = -(kp * error + kd * derivative)
-        angle = rc_utils.clamp(angle, -1, 1)
-        print(f"[PD] Error: {error}, Derivative: {derivative:.2f}, Angle: {angle:.2f}")
-
-        last_angle = -angle
+    elif blues:
+        target, color = max(blues, key=cv.contourArea), "blue"
     else:
-        print("Lost contour — holding last angle")
-        angle = -(last_angle * 0.9)  # mild decay
+        rc.drive.stop()
+        #print("No cones.")
+        return
 
-    speed = 0.67
-    rc.drive.set_speed_angle(speed, angle)
+    # ---------- geometry ----------
+    # --- geometry (add imgW!) ---
+    x, y, w, h = cv.boundingRect(target)
+    print("H: ", h)
+    cx  = x + w/2
+    imgW = rc.camera.get_width()          # you were missing this line
 
-    if rc.controller.is_down(rc.controller.Button.A):
-        print("Speed:", speed, "Angle:", angle)
+    # --- lateral set-point (shift right for red, left for blue) ---
+    center_shift = +CENTER_SHIFT_PX if color == "red" else -CENTER_SHIFT_PX
+    setpt_x      = imgW/2 + center_shift
 
-    if rc.controller.is_down(rc.controller.Button.B):
-        if contour_center is None:
-            print("No contour found")
-        else:
-            print("Center:", contour_center, "Area:", contour_area)
+    # --- steering error: POSITIVE means "steer left" ---
+    steer_err = (setpt_x - cx) / (imgW/2)
+
+    # --- range & speed ---
+    range_err = max(0, DESIRED_H - h)
+    
+    speed     = np.clip(K_SPEED*range_err, 0, 1)   # never 0 so it keeps moving
+    steering  = np.clip(K_STEER * steer_err, -1, 1)
+    if color == "blue":
+        speed *= 0.7
+        steering *= 1.4
+
+    steering  = np.clip(K_STEER * steer_err, -1, 1)
+    print("Steering:", steering, "Speed:", speed, "Color:", color, "Steer Err:", steer_err)
+    
+
+
+    # ---------- VISUAL DEBUG ----------
+    debug = frame.copy()
+    # draw bounding box & centroid
+    cv.rectangle(debug, (x, y), (x+w, y+h), (0,0,255) if color=="red" else (255,0,0), 2)
+    cv.circle(debug, (int(cx), y+h//2), 4, (0,255,0), -1)
+    # draw original centre line and shifted set-point
+    cv.line(debug, (imgW//2, 0), (imgW//2, frame.shape[0]), (200,200,200), 1)
+    cv.line(debug,
+            (imgW//2 + center_shift, 0),
+            (imgW//2 + center_shift, frame.shape[0]),
+            (0,255,255), 1)
+    # text overlay
+    cv.putText(debug,
+               f"{color} h={h} steer={steering:+.2f} speed={speed:+.2f}",
+               (10,25), cv.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+
+    cv.imshow("view", debug)
+    cv.imshow("mask red",  mask_red)
+    cv.imshow("mask blue", mask_blue)
+    cv.waitKey(1)          # required for imshow to refresh
+
+    # ---------- pass-cone reset ----------
+    if len(queue) > 0:
+        # Pull speed and angle from the first entry
+        speed = queue[0][1]         # ← index 1 is speed
+        steering = queue[0][2]         # ← index 2 is angle (normalized -1.0 to 1.0)
+        # Decrease its remaining time by the elapsed frame time
+        queue[0][0] -= rc.get_delta_time()  # ← decrement time_remaining
+        # If time has elapsed, remove this instruction
+        if queue[0][0] <= 0:
+            queue.pop(0)
+    if h > PASS_H:
+         if color == "red":
+            queue.append([1.1, 1, 0])
+            queue.append([0.2, 1, -1])
+         else:
+            blues.clear()
+    rc.drive.set_speed_angle(speed, steering)
 
 def update_slow():
-    if rc.camera.get_color_image() is None:
-        print("X" * 10 + " (No image) " + "X" * 10)
-    else:
-        if contour_center is None:
-            print("-" * 32 + " : area = " + str(contour_area))
-        else:
-            s = ["-"] * 32
-            s[int(contour_center[1] / 20)] = "|"
-            print("".join(s) + " : area = " + str(contour_area))
+    pass
 
-########################################################################################
-# DO NOT MODIFY: Register start and update and begin execution
-########################################################################################
-
+# ──────────────── run ────────────────
 if __name__ == "__main__":
     rc.set_start_update(start, update, update_slow)
     rc.go()
