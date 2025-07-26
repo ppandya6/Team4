@@ -1,121 +1,105 @@
-#!/usr/bin/env python3
-"""
-follow_car_tflite.py
-====================
-RACECAR-SDK script that:
-    • loads a TFLite single-class 'car' detector (Edge-TPU OR CPU),
-    • finds the lead car's bounding box each frame,
-    • steers and throttles to keep a set following distance.
+from pycoral.utils.edgetpu import run_inference, make_interpreter
+from pycoral.utils.dataset import read_label_file
+from pycoral.adapters.detect import get_objects
+from pycoral.adapters.common import input_size
+import sys
+import cv2
+import numpy as np
 
-Tested with:
-    • MIT BWSI RACECAR SDK 4.x  (racecar_core, racecar_utils)
-    • Python 3.8 – 3.11
-    • Edge-TPU runtime OR tflite-runtime 2.16 (CPU fallback)
-
-Adjust the PID constants & DESIRED_PX for your own chassis / camera.
-
-Author: <you>
-"""
-# ────────────────────────── RACECAR imports ───────────────────────────
-import sys, cv2 as cv, numpy as np
-import racecar_core as rc
+sys.path.insert(1, "../../library")
+import racecar_core
 import racecar_utils as rc_utils
 
-# ────────────────────────── TFLite / Coral ────────────────────────────
-USE_EDGETPU   = True                # set False to run on CPU
-MODEL_PATH    = "car_detector_edgetpu.tflite" if USE_EDGETPU else "car_detector.tflite"
-INPUT_SIZE    = 320                 # EfficientDet-Lite0 input (320×320)
+rc = racecar_core.create_racecar()
 
-if USE_EDGETPU:
-    from pycoral.utils.edgetpu import make_interpreter
-    from pycoral.adapters.common import input_tensor
-    from pycoral.adapters.detect import get_objects
-else:
-    import tflite_runtime.interpreter as tflite
-    def make_interpreter(model_path):
-        return tflite.Interpreter(model_path=model_path)
+# Model and label paths
+model_path = "congaf_edgetpu.tflite"
+label_path = "labels_conga.txt"
 
-# ────────────────────── following-distance constants ──────────────────
-DESIRED_PX     = 140       # bbox width (px) ⇔ correct gap (tune!)
-LIN_GAIN       =  0.010    # (px → m s⁻¹)
-ANG_GAIN       =  2.000    # (-0.5..0.5 image centre offset → rad s⁻¹)
-MAX_SPEED      =  0.40
-MAX_TURN       =  1.00
+# Interpreter setup
+interpreter = None
+inference_size = (0, 0)
+labels = ()
 
-# ─────────────────────── global state (set in start) ──────────────────
-interpreter    = None      # TFLite interpreter
-input_index    = None
-output_index   = None
+# PD control parameters (initially tuned; adjust as needed)
+kp = 0.00511
+kd = 0.0036
 
-# ───────────────────────────── start() ────────────────────────────────
+# Variables for PD control
+prev_error = 0
+prev_time = 0
+target_car = None
+
 def start():
-    global interpreter, input_index, output_index
-
+    global interpreter, inference_size, labels, prev_time
     rc.drive.set_speed_angle(0, 0)
-    rc.display.show_msg("Waiting for camera…")
 
-    interpreter = make_interpreter(MODEL_PATH)
-    interpreter.allocate_tensors()
-    input_index  = interpreter.get_input_details()[0]['index']
+    try:
+        interpreter = make_interpreter(model_path)
+        interpreter.allocate_tensors()
+        labels = read_label_file(label_path)
+        inference_size = input_size(interpreter)
+        print(f"Model {model_path} loaded")
+    except (ValueError, RuntimeError) as e:
+        print(f"Error loading model: {e}")
+        exit()
 
-    if USE_EDGETPU:
-        # pycoral returns parsed boxes; no need to know output index
-        rc.display.show_msg("Edge-TPU model loaded ✓")
-    else:
-        output_index = interpreter.get_output_details()[0]['index']
-        rc.display.show_msg("CPU model loaded ✓")
+    prev_time = rc.get_delta_time()
+    print("Camera-based wall follower initialized.")
 
-# ───────────────────────────── update() ───────────────────────────────
 def update():
-    # 1  Grab the latest color frame (numpy H×W×3, BGR)
-    frame = rc.camera.get_color_image()
-    if frame is None:
+    global prev_error, prev_time, target_car
+
+    image = rc.camera.get_color_image()
+    if image is None:
+        rc.drive.set_speed_angle(0, 0)
+        print("No camera image.")
         return
 
-    # 2  Resize to network input and run inference
-    resized = cv.resize(frame, (INPUT_SIZE, INPUT_SIZE))
-    inp = np.expand_dims(resized, 0).astype(np.uint8)          # uint8 model
-    input_tensor(interpreter, inp) if USE_EDGETPU else interpreter.set_tensor(input_index, inp)
-    interpreter.invoke()
+    # Preprocess image for inference
+    image_inference = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image_inference = cv2.resize(image_inference, inference_size)
 
-    # 3  Extract detections (Edge-TPU helper OR raw tensor)
-    if USE_EDGETPU:
-        detections = get_objects(interpreter, score_threshold=0.5, image_scale=1.0)
-        boxes = [d.bbox for d in detections]
-        scores = [d.score for d in detections]
-    else:
-        # output tensor shape: [N,6] = [x1,y1,x2,y2,score,class]
-        dets = interpreter.get_tensor(output_index)[0]
-        mask = dets[:,4] > 0.5
-        boxes = dets[mask][:,:4] if np.any(mask) else []
-        scores= dets[mask][:,4]  if np.any(mask) else []
+    run_inference(interpreter, image_inference.tobytes())
+    objs = get_objects(interpreter, 0.1)
 
-    if not boxes:
-        rc.drive.set_speed_angle(0, 0)   # nothing seen → stop
-        rc.display.set_color(rc.display.Color.RED_LOW)
+    if not objs:
+        rc.drive.set_speed_angle(0, 0)
+        print("Target not detected")
         return
 
-    # 4  Pick best (highest score) detection
-    best_i     = int(np.argmax(scores))
-    x1,y1,x2,y2= boxes[best_i]
-    # Edge-TPU boxes already in image coords; CPU raw boxes need scaling
-    if not USE_EDGETPU:
-        x1,y1,x2,y2 = int(x1),int(y1),int(x2),int(y2)
+    # Assume first object is the one to follow
+    target_car = objs[0]
+    bbox = target_car.bbox
+    center_x = (bbox.xmin + bbox.xmax) // 2
 
-    # 5  Compute control error terms
-    w_bbox      = x2 - x1
-    centre_err  = ((x1 + x2)/2 - INPUT_SIZE/2) / (INPUT_SIZE/2)  # -1 … 1
-    dist_err_px = DESIRED_PX - w_bbox
+    # Calculate error
+    frame_center_x = inference_size[0] // 2
+    error = center_x - frame_center_x
 
-    speed = np.clip(dist_err_px * LIN_GAIN, -MAX_SPEED, MAX_SPEED)
-    turn  = np.clip(-centre_err * ANG_GAIN, -MAX_TURN,  MAX_TURN)
+    # Time difference
+    current_time = rc.get_delta_time()
+    dt = current_time - prev_time
+    dt = dt if dt > 0 else 1e-5  # prevent division by zero
 
-    rc.drive.set_speed_angle(speed, turn)
+    # PD control
+    derivative = (error - prev_error) / dt
+    angle = kp * error + kd * derivative
+    angle = rc_utils.clamp(angle, -1, 1)
 
-    # 6  Overlay bbox & debug text on the RACECAR HUD
-    rc.display.draw_rectangle(x1, y1, x2, y2, rc.display.Color.GREEN)
-    rc.display.show_msg(f"w={w_bbox:3.0f}px  Δcx={centre_err:+.2f}  v={speed:+.2f}  ω={turn:+.2f}")
+    # Constant speed
+    speed = 0.85
 
-# ───────────────────────────────── run ────────────────────────────────
+    # Drive
+    rc.drive.set_speed_angle(speed, angle)
+
+    # Update variables
+    prev_error = error
+    prev_time = current_time
+
+def update_slow():
+    pass
+
 if __name__ == "__main__":
-    rc.run(start, update)
+    rc.set_start_update(start, update, update_slow)
+    rc.go()
