@@ -1,8 +1,5 @@
 # TODO: Implement line_follower
 
-=======
-
-=======
 """
 MIT BWSI Autonomous RACECAR
 MIT License
@@ -27,6 +24,7 @@ color changes, following colors with higher priority than others.
 import sys
 import cv2 as cv
 import numpy as np
+import matplotlib.pyplot as plt
 
 sys.path.insert(1, "../../library")
 import racecar_core
@@ -51,17 +49,29 @@ angle = 0.0
 contour_center = None
 contour_area = 0
 color_name = None
-kp = 0.007
-kd = 0.0015  # Derivative gain
+kp = 0.015
+#kd = 0.0015  # Derivative gain
+#kd = 0.001 # --> 0.00295
+kd=0.00025
+#kd = 0.1 * Ku * Tu
+#Kp=0.8*Ku 
+#kp = 0.001
+#ku = 0.00125
+#Tu = 2
 last_angle = 0
 last_error = 0
-
+time = []
+position=[]
+elapsed_time=0
 ########################################################################################
 # Functions
 ########################################################################################
+def speed_func(angle):
+    return -(angle**2)
+    
 
 def update_contour():
-    global contour_center, contour_area, color_name, kp
+    global contour_center, contour_area, color_name, kp, time
 
     image = rc.camera.get_color_image()
     if image is None:
@@ -85,14 +95,16 @@ def update_contour():
         rc_utils.draw_contour(image, green)
         rc_utils.draw_circle(image, contour_center)
         color_name = "green"
-        kp = 0.0045
+        kp = 0.001
     elif orange_area > 0:
         contour_center = rc_utils.get_contour_center(orange)
         contour_area = orange_area
         rc_utils.draw_contour(image, orange)
         rc_utils.draw_circle(image, contour_center)
         color_name = "orange"
-        kp = 0.003
+        kp = 0.001
+        
+        
     else:
         contour_center = None
         contour_area = 0
@@ -118,10 +130,23 @@ def start():
     )
 
 def update():
-    global speed, angle, last_angle, kd, last_error
+    global speed, angle, last_angle, kp, kd, last_error,elapsed_time, position, time
 
     update_contour()
 
+    speed=1
+    elapsed_time += rc.get_delta_time() 
+    #print(elapsed_time)
+    if elapsed_time < 22:
+        print("<22s")
+        speed=0.85
+        kp = 0.0155
+        kd = 0.01
+    else:
+        print('past')
+        kd=0.00025
+
+    
     if contour_center is not None:
         setpoint = rc.camera.get_width() // 2
         present_value = contour_center[1]
@@ -143,7 +168,9 @@ def update():
         print("Lost contour — holding last angle")
         angle = last_angle * 0.9  # mild decay
 
-    speed = 0.9
+    
+
+    
     rc.drive.set_speed_angle(speed, angle)
 
     if rc.controller.is_down(rc.controller.Button.A):
@@ -154,6 +181,32 @@ def update():
             print("No contour found")
         else:
             print("Center:", contour_center, "Area:", contour_area)
+
+    elapsed_time += rc.get_delta_time()
+    '''
+    scan = rc.lidar.get_samples()
+    right_distance = rc_utils.get_lidar_average_distance(scan, 90, 5)
+    left_distance = rc_utils.get_lidar_average_distance(scan, -90, 5)
+    error = right_distance - left_distance
+    '''
+    position.append(angle)
+    time.append(elapsed_time)
+    
+
+    if rc.controller.is_down(rc.controller.Button.X):
+        print("[INFO] Saving plot to 'angle_plot.png'...")
+        plt.figure()
+        plt.plot(time, position, label="Angle")
+        plt.axis((0, 20, -1, 1))
+        plt.xlabel("Time (s)")
+        plt.ylabel("Angle")
+        plt.title("Angle over Time")
+        plt.grid(True)
+        plt.legend()
+        plt.savefig("angle_plot.png")
+        print("[INFO] Plot saved to 'angle_plot.png'. You can view it later.")
+
+    
 
 def update_slow():
     if rc.camera.get_color_image() is None:
@@ -173,5 +226,3 @@ def update_slow():
 if __name__ == "__main__":
     rc.set_start_update(start, update, update_slow)
     rc.go()
-
-
