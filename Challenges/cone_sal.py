@@ -1,140 +1,269 @@
-# lab_h/cone_slalom_lidar_state.py
-#
-# Color-aware cone-slalom controller (camera only)
+"""
+MIT BWSI Autonomous RACECAR
+MIT License
+racecar-neo-prereq-labs
 
-import sys, cv2 as cv, numpy as np
-sys.path.insert(1, "../../library")
-import racecar_core, racecar_utils as rc_utils
+File Name: Lab H - Cone Slalom 
 
-# ──────────────── CONFIG ────────────────
-# HSV ranges for red and blue cones
-RED_LO1, RED_HI1 = (0,   120,  70), (10, 255, 255)       # low red
-RED_LO2, RED_HI2 = (170, 120,  70), (180,255, 255)       # high red (wrap)
-BLUE_LO, BLUE_HI = (100, 150,   0), (140,255, 255)
+Title: Student 
 
-MIN_AREA_PX   = 30        # ignore tiny blobs
-CENTER_SHIFT_PX = 10     # positive value; we’ll decide sign later
-DESIRED_H       = 100      # pick ~h when the cone is at the “pass” distance
-PASS_H          = 150      # if h gets this big we consider the cone passed
-K_STEER         = 0.7      # 4.0 was clipping to ±1 too early
-K_SPEED         = 0.051     # keeps speed moderate
-time = 0
-queue = []  # driving queue, not used in this lab
-# ──────────────── setup ────────────────
+Author: Karen Huang 
+
+Purpose: The goal of this lab is to program your RACECAR to navigate through a "cone slalom" course, which is where your vehicle must swerve between red and blue cones to reach the finish line. 
+
+Expected Outcome: Rules of the Road: To navigate through the cone slalom course, program your RACECAR to follow two rules:
+
+Drive on the right side of RED cones
+Drive on the left side of BLUE cones
+"""
+
+########################################################################################
+# Imports
+########################################################################################
+
+import sys
+import cv2 as cv
+
+# If this file is nested inside a folder in the labs folder, the relative path should
+# be [1, ../../library] instead.
+sys.path.insert(1, '../../library')
+import racecar_core
+import racecar_utils as rc_utils
+import numpy as np
+import math
+
+########################################################################################
+# Global variables
+########################################################################################
+
 rc = racecar_core.create_racecar()
 
-# ────────── helper: contour extractor ──────────
-def find_color_contours(hsv, lo1, hi1, lo2=None, hi2=None):
-    mask = cv.inRange(hsv, lo1, hi1)
-    if lo2 is not None:
-        mask |= cv.inRange(hsv, lo2, hi2)
-    mask = cv.erode(mask, None, iterations=2)
-    mask = cv.dilate(mask, None, iterations=2)
-    cnts, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-    return [c for c in cnts if cv.contourArea(c) > MIN_AREA_PX]
+# Declare any global variables here
+# >> Constants
+# The smallest contour we will recognize as a valid contour (Adjust threshold!)
+MIN_CONTOUR_AREA = 30
 
-# ─────────── lifecycle callbacks ───────────
-def start():
-    print("Cone-slalom controller ready.")
+# A crop window for the floor directly in front of the car
+CROP_FLOOR = ((280, 0), (rc.camera.get_height(), rc.camera.get_width()))
+#CROP_FLOOR = ((100, 0), (rc.camera.get_height(), rc.camera.get_width()))
 
-def update():
-    global time, K_SPEED, K_STEER, RED_LO1, RED_HI1, RED_LO2, RED_HI2, BLUE_LO, BLUE_HI, MIN_AREA_PX, CENTER_SHIFT_PX, DESIRED_H, PASS_H
-    frame = rc.camera.get_color_image()
-    if frame is None:
-        return
-    
-    hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
+# HSV Thresholds
+BLUE = ((90, 115, 115),(120, 255, 255), "BLUE")
+RED = ((170, 115, 115),(10, 255, 255), "RED")
+COLORS = [RED, BLUE] # List of colors
 
-    # ---------- masks ----------
-    mask_red  = cv.inRange(hsv, RED_LO1, RED_HI1) | cv.inRange(hsv, RED_LO2, RED_HI2)
-    mask_blue = cv.inRange(hsv, BLUE_LO,  BLUE_HI)
+MIN_RANGE = 5   # Ignore values < 5 cm (noise)
+MAX_RANGE = 250 # Ignore anything farther than 2.5 meter
 
-    # ---------- find contours ----------
-    reds  = find_color_contours(hsv, RED_LO1, RED_HI1, RED_LO2, RED_HI2)
-    blues = find_color_contours(hsv, BLUE_LO,  BLUE_HI)
+Kp = -2
 
-    # ---------- pick target ----------
-    if reds:
-        target, color = max(reds, key=cv.contourArea), "red"
-        
-    elif blues:
-        target, color = max(blues, key=cv.contourArea), "blue"
+# Variables about turning
+TURN_THRESHOLD = 70 # 100 cm
+
+# >> Variables
+cone_distance = 0
+closest_cone_center = None  # The (pixel row, pixel column) of contour
+closest_cone_area = 0  # The area of contour
+speed = 0
+angle = 0
+
+cones = []
+queue = [] # The queue of instructions
+is_queue_empty = "YES"  # The queue of instructions
+closest_cone_color = "None" # The current color of the cone
+state = "SEARCHING"
+
+
+
+########################################################################################
+# Functions
+########################################################################################
+
+# [FUNCTION] Find the colors in the image
+def find_cones(image):
+    #color_name = "None" # The detected color from the list of color thresholds
+    #color_area = 0 # The area of the detected color
+    #color_center = None # The center of the detected color
+    local_cones = []
+
+    for (hsv_lower, hsv_upper, color) in COLORS:
+        contours = rc_utils.find_contours(image, hsv_lower, hsv_upper)
+        largest_contour = rc_utils.get_largest_contour(contours)
+        if largest_contour is not None:
+            local_contour_center = rc_utils.get_contour_center(largest_contour)
+            local_contour_area = rc_utils.get_contour_area(largest_contour)
+            if local_contour_area > MIN_CONTOUR_AREA:
+                cone_area = local_contour_area
+                cone_center = local_contour_center
+                cone_color = color
+                local_cones.append({"cone_color": cone_color, "cone_area": cone_area, "cone_center": cone_center})
+
+    return sorted(local_cones, key=lambda c: c["cone_area"], reverse=True)  # Sorts all found cones so that the largest one comes first
+
+def find_closest_cone(lidar):
+    global cone_distance
+
+    #Angles in front of the car (e.g. 270° to 360° to 90°)
+    front_angles = list(range(270, 360)) + list(range(0, 91))
+
+    front_distances = [lidar[a % 360] for a in front_angles if lidar[a % 360] > 0.0]
+
+    valid_distances = [d for d in front_distances if 5 < d < 1000]
+
+    if valid_distances:
+        cone_distance = min(valid_distances)
+        #print(f"cone_distance = {cone_distance}")
+
+# [FUNCTION] Finds contours in the current color image and uses them to update
+# contour_center and contour_area
+def update_contour():
+    global cones
+
+
+    image = rc.camera.get_color_image()
+
+    if image is None:
+        contour_center = None
+        contour_area = 0
+
+
     else:
-        rc.drive.stop()
-        #print("No cones.")
+        # Crop the image to the floor directly in front of the car
+        image = rc_utils.crop(image, CROP_FLOOR[0], CROP_FLOOR[1])
+        cones = find_cones(image)
+
+
+# [FUNCTION] Appends the correct instructions to make a 90 degree right turn to the queue
+def turnRight():
+    global queue
+
+    queue.clear()
+
+    queue.append([1.2, 0.5, 1])
+    queue.append([0.5, 0.5, 0.5])
+    queue.append([0.2, 0.5, 0])
+    queue.append([1.5, 0.5, -1])
+    queue.append([0.1, 0.5, 0])
+
+# [FUNCTION] Appends the correct instructions to make a 90 degree left turn to the queue
+def turnLeft():
+    global queue
+
+    queue.clear()
+
+    queue.append([1.2, 0.5, -1])
+    queue.append([0.5, 0.5, -0.5])
+    queue.append([0.2, 0.5, 0])
+    queue.append([1.5, 0.5, 1])
+    queue.append([0.1, 0.5, 0])
+
+
+# [FUNCTION] The start function is run once every time the start button is pressed
+def start():
+    global speed
+    global angle
+
+    # Initialize variables
+    speed = 0.5 
+    angle = 0
+
+    # Set initial driving speed and angle
+    rc.drive.set_speed_angle(speed, angle)
+
+    # Set update_slow to refresh every half second
+    #rc.set_update_slow_time(0.5)
+
+# [FUNCTION] After start() is run, this function is run once every frame (ideally at
+# 60 frames per second or slower depending on processing speed) until the back button
+# is pressed  
+def update():
+    global cones
+    global queue
+    global speed
+    global angle
+    global closest_cone_color
+    global closest_cone_center
+    global closest_cone_area
+    global is_queue_empty
+    global state
+    global cone_distance
+
+    # Search for contours in the current color image
+    update_contour()
+
+    lidar = rc.lidar.get_samples()
+    find_closest_cone(lidar) 
+
+    if cone_distance is None:
         return
 
-    # ---------- geometry ----------
-    # --- geometry (add imgW!) ---
-    x, y, w, h = cv.boundingRect(target)
-    print("H: ", h)
-    cx  = x + w/2
-    imgW = rc.camera.get_width()          # you were missing this line
+    if closest_cone_center is None:
+        closest_cone_center = 0
 
-    # --- lateral set-point (shift right for red, left for blue) ---
-    center_shift = +CENTER_SHIFT_PX if color == "red" else -CENTER_SHIFT_PX
-    setpt_x      = imgW/2 + center_shift
+    print(f"Gcone_distance = {cone_distance}") 
+    if cones:
+        closest_cone = cones[0]   # Largest cone
+        closest_cone_color = closest_cone["cone_color"]
+        closest_cone_center = closest_cone["cone_center"]
 
-    # --- steering error: POSITIVE means "steer left" ---
-    steer_err = (setpt_x - cx) / (imgW/2)
+    if cone_distance > MAX_RANGE:
+        state = "SEARCHING"
+        angle = 0
+        speed = 0.5 
+    elif TURN_THRESHOLD <= cone_distance <= MAX_RANGE:
+        state = "APPROACHING"
+        if closest_cone_center is not None:
+            setpoint = rc.camera.get_width() // 2  # x=320
 
-    # --- range & speed ---
-    range_err = max(0, DESIRED_H - h)
-    
-    speed     = np.clip(K_SPEED*range_err, 0, 1)   # never 0 so it keeps moving
-    steering  = np.clip(K_STEER * steer_err, -1, 1)
-    if color == "blue":
-        speed *= 0.7
-        steering *= 1.4
+            present_value = closest_cone_center[1]
 
-    steering  = np.clip(K_STEER * steer_err, -1, 1)
-    print("Steering:", steering, "Speed:", speed, "Color:", color, "Steer Err:", steer_err)
-    
+            # Calculate the error signal e(t)
+            error = setpoint - present_value
+
+            # Calculate the control signal u(t)
+            angle = Kp * error
+
+            # Clamp angle to prevent assertion error
+            angle = rc_utils.clamp(angle, -1, 1)
+    else:
+        state = "TURNING"
+        if is_queue_empty == "YES":
+            if closest_cone_color == "RED":
+                turnRight()
+                is_queue_empty = "NO"
+            elif closest_cone_color == "BLUE":
+                turnLeft()
+                is_queue_empty = "NO"
+
+        elif is_queue_empty == "NO":
+            if len(queue) > 0:
+                speed = queue[0][1]
+                angle = queue[0][2]
+                queue[0][0] -= rc.get_delta_time()
+                if queue[0][0] <= 0:
+                    queue.pop(0)
+
+            elif len(queue) == 0:
+                angle = 0
+                is_queue_empty = "YES"
+                state = "SEARCHING"
 
 
-    # ---------- VISUAL DEBUG ----------
-    debug = frame.copy()
-    # draw bounding box & centroid
-    cv.rectangle(debug, (x, y), (x+w, y+h), (0,0,255) if color=="red" else (255,0,0), 2)
-    cv.circle(debug, (int(cx), y+h//2), 4, (0,255,0), -1)
-    # draw original centre line and shifted set-point
-    cv.line(debug, (imgW//2, 0), (imgW//2, frame.shape[0]), (200,200,200), 1)
-    cv.line(debug,
-            (imgW//2 + center_shift, 0),
-            (imgW//2 + center_shift, frame.shape[0]),
-            (0,255,255), 1)
-    # text overlay
-    cv.putText(debug,
-               f"{color} h={h} steer={steering:+.2f} speed={speed:+.2f}",
-               (10,25), cv.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+    # Send speed and angle commands to the RACECAR
+    rc.drive.set_speed_angle(speed, angle)
 
-    cv.imshow("view", debug)
-    cv.imshow("mask red",  mask_red)
-    cv.imshow("mask blue", mask_blue)
-    cv.waitKey(1)          # required for imshow to refresh
-
-    # ---------- pass-cone reset ----------
-    if len(queue) > 0:
-        # Pull speed and angle from the first entry
-        speed = queue[0][1]         # ← index 1 is speed
-        steering = queue[0][2]         # ← index 2 is angle (normalized -1.0 to 1.0)
-        # Decrease its remaining time by the elapsed frame time
-        queue[0][0] -= rc.get_delta_time()  # ← decrement time_remaining
-        # If time has elapsed, remove this instruction
-        if queue[0][0] <= 0:
-            queue.pop(0)
-    if h > PASS_H:
-         if color == "red":
-            queue.append([1.1, 1, 0])
-            queue.append([0.2, 1, -1])
-         else:
-            blues.clear()
-    rc.drive.set_speed_angle(speed, steering)
-
+# [FUNCTION] update_slow() is similar to update() but is called once per second by
+# default. It is especially useful for printing debug messages, since printing a 
+# message every frame in update is computationally expensive and creates clutter
 def update_slow():
-    pass
+    pass # Remove 'pass and write your source code for the update_slow() function here
 
-# ──────────────── run ────────────────
+
+########################################################################################
+# DO NOT MODIFY: Register start and update and begin execution
+########################################################################################
+
 if __name__ == "__main__":
     rc.set_start_update(start, update, update_slow)
     rc.go()
+
