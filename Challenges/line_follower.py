@@ -1,4 +1,4 @@
-Line follower using path planning, becoming line-path follower:
+#Line follower using path planning, becoming line-path follower:
 
 import sys
 import numpy as np
