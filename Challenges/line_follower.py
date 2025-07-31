@@ -1,3 +1,137 @@
+Line follower using path planning, becoming line-path follower:
+
+import sys
+import numpy as np
+import cv2
+
+sys.path.insert(1, '../../library')
+import racecar_core
+import racecar_utils as rc_utils
+
+rc = racecar_core.create_racecar()
+speed = 0.0
+angle = 0.0
+current_color = None
+def start():
+    global speed, angle
+    rc.drive.set_max_speed(0.5)  # Set maximum speed
+    speed = 0.9                  # Initial forward speed
+    angle = 0.0                  # Initial steering angle
+    rc.set_update_slow_time(0.5) # Set slow update timer (unused here)
+
+# --- Define HSV thresholds for red, blue, green ---
+def get_color_mask(hsv):
+    # Red has two ranges in HSV due to wrapping around hue = 0
+    lower_red1 = np.array([0, 100, 100])
+    upper_red1 = np.array([10, 255, 255])
+    lower_red2 = np.array([160, 100, 100])
+    upper_red2 = np.array([179, 255, 255])
+
+    # Blue and green ranges
+    lower_blue = np.array([100, 150, 100])
+    upper_blue = np.array([130, 255, 255])
+    lower_green = np.array([40, 100, 100])
+    upper_green = np.array([80, 255, 255])
+
+    # Priority 1: Red
+    red_mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+    red_mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    red_mask = cv2.bitwise_or(red_mask1, red_mask2)
+    if cv2.countNonZero(red_mask) > 300:
+        current_color = "red"
+        return red_mask  # Return red if strong signal
+
+    # Priority 2: Green
+    green_mask = cv2.inRange(hsv, lower_green, upper_green)
+    if cv2.countNonZero(green_mask) > 300:
+        current_color = "green"
+        return green_mask
+
+    # Priority 3: Blue
+    blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
+    if cv2.countNonZero(blue_mask) > 300:
+        current_color = "blue"
+        return blue_mask
+
+    
+
+    return None  # No valid line found
+
+def update():
+    global speed, angle
+    image = rc.camera.get_color_image()  # Get camera image
+
+    if image is None:
+        rc.drive.set_speed_angle(0, 0)
+        return
+
+    height, width, _ = image.shape  # Get dimensions of the image
+    cropped = image[height // 4 :, :]  # Focus on bottom half of image
+
+    hsv = cv2.cvtColor(cropped, cv2.COLOR_BGR2HSV)  # Convert to HSV
+
+    mask = get_color_mask(hsv)  # Get mask of desired line color
+
+    print(f"[DEBUG] Currently following: {current_color}")
+
+
+    if mask is None:
+        rc.drive.set_speed_angle(0.1, -1)  # Move slowly forward if no line
+        return
+
+    # Find contours in the mask
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if not contours:
+        rc.drive.set_speed_angle(0.1, -1)  # Still no line found
+        return
+
+    largest = max(contours, key=cv2.contourArea)  # Pick the biggest line contour
+    filled_mask = np.zeros_like(mask)  # Make a blank mask
+    cv2.drawContours(filled_mask, [largest], -1, 255, -1)  # Fill the contour onto mask
+
+    # Windowed region scoring (like LiDAR heading search)
+    num_regions = 15  # Divide image into 15 vertical regions
+    region_width = width // num_regions
+    region_scores = []
+
+    for i in range(num_regions):
+        x_start = i * region_width
+        region = filled_mask[:, x_start : x_start + region_width]
+        score = cv2.countNonZero(region)  # Count pixels in each region
+        region_scores.append(score)
+
+    best_idx = int(np.argmax(region_scores))  # Best heading = region with most line
+    chosen_heading = (best_idx - num_regions // 2) / (num_regions // 2)  # Normalize [-1, 1]
+
+    # Get contour center for center offset
+    M = cv2.moments(largest)
+    if M["m00"] > 0:
+        cx = int(M["m10"] / M["m00"])  # Centroid x
+        center_offset = (cx - width // 2) / (width // 2)  # Normalize [-1, 1]
+    else:
+        center_offset = 0.0
+
+    kp = 0.5  # Centering sensitivity
+    curve_adjust = rc_utils.clamp(center_offset * kp, -1.0, 1.0)  # Clamp offset
+
+    # Combine region heading and center offset
+    merged_angle = rc_utils.clamp((chosen_heading + curve_adjust) / 2.0, -1.0, 1.0)
+
+    # Dynamic speed: more visible line = higher speed
+    total_line_pixels = cv2.countNonZero(filled_mask)
+    speed = 1.0 if total_line_pixels > 5000 else 0.6
+
+    rc.drive.set_speed_angle(speed, merged_angle)  # Send drive command
+
+def update_slow():
+    pass  # No slow update logic needed
+
+if __name__ == "__main__":
+    rc.set_start_update(start, update, update_slow)
+    rc.go()
+
+
 # TODO: Implement line_follower
 
 """
