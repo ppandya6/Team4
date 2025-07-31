@@ -1,4 +1,4 @@
-#team 2's code, i (matthew) cleaned it up, removed a few redundant bits, changed up variable names, added all the comments
+#team 2's base, variation, i (matthew) cleaned it up, removed a few redundant bits, changed up variable names, added all the comments
 import sys
 import math
 import numpy as np
