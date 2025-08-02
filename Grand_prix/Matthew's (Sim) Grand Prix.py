@@ -6,6 +6,7 @@
 #fix elevator code -> surroundings are different from sim
 #test all that p control
 #fix last state -> currently, i think it will fail on rainbow road -> it has to figure out some way to change states (maybe if a certain color exists??)
+#add ros for ramp (pitch from attitude node)
 
 import sys
 import math
