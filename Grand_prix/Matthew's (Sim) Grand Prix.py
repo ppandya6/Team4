@@ -36,7 +36,7 @@ state=0 #initialize state machine
 CROP_FLOOR = ((100, 100), (rc.camera.get_height(), rc.camera.get_width()-100)) 
 
 MIN_CONTOUR_AREA = 30 
-
+queue = []
 color = ''
 
 contour_center = None
@@ -121,10 +121,10 @@ def update_contour():
 
 
 def wall_follow():
-    global speed, angle
+    global speed, angle, queue
 
     scan_data = rc.lidar.get_samples() #initialize scan
-
+    pitch_deg = rc.physics.get_attitude()[1]
     #fov_span = 120
     window_size = 30 #width that the car checks around a given heading (window size, centered around angle value)
     min_dist = 120 #far distances are only checked if they exceed this value
@@ -178,7 +178,7 @@ def wall_follow():
 
     error = right_wall_length - left_wall_length #if error = 0, then the right and left wall lengths are equal, meaning the car is centered
     wall_adjust = rc_utils.clamp(error * kp, -1, 1) #clamps
-
+    
     angle = rc_utils.clamp((chosen_heading / 75 + wall_adjust) / 2.0, -1.0, 1.0) 
     #we checked heading between -75 and 75. dividing by 75 normalizes it between -1 and 1. 
     #wall angle is already clamped between -1 and 1
@@ -187,11 +187,15 @@ def wall_follow():
     speed_threshold=400 #if best_opening is above this distance, set speed up. else, lower speed
     speed = 1.0 if best_opening > speed_threshold else 0.6 #if the path forward is very clear (the closest point is 220+ cm away), set speed = 1. if it is not so clear, set speed = 0.6
 
+    if pitch_deg > 7:
+        angle = 0
+    
     front_distance = rc_utils.get_lidar_average_distance(scan_data,0,5)
     
     ''' uncomment irl because you can account for pitch -> this doesnt work in sim (no ros)
     if front_distance < 50: #anti-crash
-        speed = -1 
+        speed = -1
+    
 '''
     #print(best_opening) 
 
