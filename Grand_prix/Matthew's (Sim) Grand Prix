@@ -1,4 +1,12 @@
+#so this code was coded for the sim for obvious reasons, i am hoping it serves as a strong foundation
 #team 2's base for pathfinding (wall follow function), i (matthew) cleaned it up, removed a few redundant bits, changed up variable names, added all the comments
+
+#to-do
+#tune hsv for: elevator, lines
+#fix elevator code -> surroundings are different from sim
+#test all that p control
+#fix last state -> currently, i think it will fail on rainbow road -> it has to figure out some way to change states (maybe if a certain color exists??)
+
 import sys
 import math
 import numpy as np
@@ -15,24 +23,23 @@ contour_center = None
 contour_area = 0
 color_name = None
 
-GREEN = ((27, 84, 184), (90, 250, 255))
-SIMGREEN = ((30,50,50),(80,255,255))
+GREEN = ((27, 84, 184), (90, 250, 255)) #the green values we tuned for the line follower quest
+SIMGREEN = ((30,50,50),(80,255,255)) #green for the sim
 BLUE = ((95, 150, 150), (120, 255, 255)) 
 RED_1 = ((0, 50, 50), (10, 255, 255))      # low hue red
 RED_2 = ((170, 50, 50), (180, 255, 255))   # high hue red
 ORANGE = ((5, 16, 195), (12, 225, 225))
 
-state=0
+state=0 #initialize state machine
 
-CROP_FLOOR = ((100, 100), (rc.camera.get_height(), rc.camera.get_width()-100))
+CROP_FLOOR = ((100, 100), (rc.camera.get_height(), rc.camera.get_width()-100)) 
 
-MIN_CONTOUR_AREA = 30
+MIN_CONTOUR_AREA = 30 
 
 color = ''
 
 contour_center = None
 contour_area=0
-
 
 
 #================================================================
@@ -42,11 +49,15 @@ def fix_angle(deg):
     #eg -225=45
 
 def update_contour():
-    global contour_center, contour_area, color_name, kp, time, color
+    global contour_center, contour_area, color_name, color
+
+    #reset area variables at the beginning of every update cycle
     red_area=0
     blue_area=0
     orange_area=0
 
+
+    #set up image
     image = rc.camera.get_color_image()
     if image is None:
         contour_center = None
@@ -56,14 +67,17 @@ def update_contour():
     image = rc_utils.crop(image, CROP_FLOOR[0], CROP_FLOOR[1])
     image = cv.cvtColor(image, cv.COLOR_BGR2HSV)
 
+
+    #make masks
     blue_mask = cv.inRange(image,BLUE[0],BLUE[1])
 
-    redmask1 = cv.inRange(image, RED_1[0], RED_1[1])
-    redmask2 = cv.inRange(image, RED_2[0], RED_2[1])
-    combined_red_mask = redmask1 | redmask2
+    redmask1 = cv.inRange(image, RED_1[0], RED_1[1]) #lower hsv red
+    redmask2 = cv.inRange(image, RED_2[0], RED_2[1]) #higher hsv red
+    combined_red_mask = redmask1 | redmask2 #combine the lower/upper red masks
 
     orange_mask = cv.inRange(image, ORANGE[0], ORANGE[1])
 
+    #get contours, then get largest contour, then get area of that largest contour for each color
     blue_contours = cv.findContours(blue_mask, cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE)[0]
     blue = rc_utils.get_largest_contour(blue_contours, MIN_CONTOUR_AREA)
     blue_area = rc_utils.get_contour_area(blue) if blue is not None else 0
@@ -76,10 +90,13 @@ def update_contour():
     orange = rc_utils.get_largest_contour(orange_contours, MIN_CONTOUR_AREA)
     orange_area = rc_utils.get_contour_area(orange) if orange is not None else 0
     
+
+    #debugging
     #print('blue area: ' + str(blue_area))
     #print('red area: ' + str(red_area))
     #print('orange area: ' + str(orange_area))
 
+#see which color is biggest, then set the contour center to whatever the biggest color's center is (same idea for area)
     if red_area >= blue_area and red_area >= orange_area:
         color = "red"
         contour_center = rc_utils.get_contour_center(red)
@@ -93,8 +110,10 @@ def update_contour():
         contour_center = rc_utils.get_contour_center(orange)
         contour_area = orange_area
 
+    
+    #debugging
     #print(blue_area)
-    rc.display.show_color_image(combined_red_mask)
+    #rc.display.show_color_image(combined_red_mask)
 
         
         
@@ -103,7 +122,7 @@ def update_contour():
 def wall_follow():
     global speed, angle
 
-    scan_data = rc.lidar.get_samples()
+    scan_data = rc.lidar.get_samples() #initialize scan
 
     #fov_span = 120
     window_size = 30 #width that the car checks around a given heading (window size, centered around angle value)
@@ -176,12 +195,13 @@ def wall_follow():
     #print(best_opening) 
 
 def get_AR_marker():
+    #creates markers
     global markers
     image = rc.camera.get_color_image()
 
     markers=rc_utils.get_ar_markers(image)
 
-    rc_utils.draw_ar_markers(image,markers)
+    rc_utils.draw_ar_markers(image,markers) 
     
 
 
@@ -195,47 +215,62 @@ def start():
 def update():
     global state, speed, angle, color, contour_area, contour_center
 
-    scan = rc.lidar.get_samples()
-    front_distance = rc_utils.get_lidar_average_distance(scan,0,5)
-    left_distance = rc_utils.get_lidar_average_distance(scan,-90,5)
-    
+    scan = rc.lidar.get_samples() #set up lidar
+    front_distance = rc_utils.get_lidar_average_distance(scan,0,5) #5 degree window directly in front of the car
+    left_distance = rc_utils.get_lidar_average_distance(scan,-90,5) #5 degree window to the left of the car
+    right_distance = rc_utils.get_lidar_average_distance(scan,90,5) #5 degree window to the right of the car
+
     #wall_follow()
-    get_AR_marker() #1 = elevator
-    area = 0
-    for marker in markers:
+    get_AR_marker() #ar id 1 = elevator
+    area = 0 #reset area (of ar tags)
+
+    for marker in markers: #iterate through markers
+
+        #find marker id
         #print(marker.get_id())
-        area = (marker.get_corners_aruco_format()[0][2][0] - marker.get_corners_aruco_format()[0][0][0]) * (marker.get_corners_aruco_format()[0][2][1] - marker.get_corners_aruco_format()[0][0][1])
-        if marker.get_id() == 1 and area > 300:
-            state=1
+
+        area = (marker.get_corners_aruco_format()[0][2][0] - marker.get_corners_aruco_format()[0][0][0]) * (marker.get_corners_aruco_format()[0][2][1] - marker.get_corners_aruco_format()[0][0][1]) #calculate area of ar marker
+        if marker.get_id() == 1 and area > 300: #if the area is high enough (if car is close enough) and the id is right, change states
+            state=1 #getting onto the elevator
+            ''' tried to do some ar marker stuff here but its useless in real life because of the rainbow walls
+        elif marker.get_id() == 5 and area >300: #if the area is high enough (the car is close enough), then you can change to the finishing state
+            state=4
+            '''
         #print(area)
     #print(area)
-    if state == 0: #starting
-        wall_follow()
+
+
+    if state == 0: #starting (pre-elevator)
+        wall_follow() #just wall follow until the elevator
         
     elif state == 1: #getting on the elevator
 
         speed = 1
         angle = 0
 
+        #reset variables
         contour_area=0
         contour_center=None
+
         update_contour()
+
+        #debugging
         #print(contour_area)
         #print(color)
 
-           
-
-        if front_distance<300 and color == 'red':
+        
+        if front_distance<300 and color == 'red': #if the car is close enough and the light is red, dont go
             speed = 0
-        else: 
+        else: #else go towards the elevator
             speed = 0.5
 
         
-        
-        print(front_distance)
-        print(left_distance)
+        #debugging
+        #print(front_distance)
+        #print(left_distance)
 
-        if front_distance > 70:
+
+        if front_distance > 70: #if it is not too close to the front, use Pcontrol to gently keep left_distance at a value (contour center was inconsistent/not working)
             setpoint = 120
             present_value = left_distance
 
@@ -246,17 +281,18 @@ def update():
             angle = rc_utils.clamp(angle,-1,1)
             #print(error)
 
-        elif front_distance<65 and left_distance<65:
+        elif front_distance<65 and left_distance<65: #if the car is close enough and the left wall is close (means that the car is on the elevator), change states 
             state = 2
 
     elif state == 2: #getting off the elevator
         if left_distance>60:
+            #if the left distance goes up -> elevator is at the top, change states
             state=3
     elif state == 3: #past the elevator
-        speed=1
+        speed=1 #get off the elevator
         
         
-        #if both green and blue are in frame, set setpoint to the left side of the screen -> force turn left
+        #if both green and blue are in frame, set setpoint to the left side of the screen -> force turn left (optimal line is two left turns after the elevator)
         image = rc.camera.get_color_image()
 
         image = rc_utils.crop(image, (0,0),(rc.camera.get_height(),200))
@@ -268,11 +304,12 @@ def update():
         green_contours,_ = cv.findContours(green_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
         blue_contours,_ = cv.findContours(blue_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
 
-        rc.display.show_color_image(green_mask)
-
+        #debugging
+        #rc.display.show_color_image(green_mask)
         #print(green_contours)
 
-        if green_contours:
+        #pcontrol
+        if green_contours: 
             green = rc_utils.get_largest_contour(green_contours)
             if green is not None:
                 contour_center = rc_utils.get_contour_center(green)
@@ -296,15 +333,12 @@ def update():
                 error = setpoint - present_value
                 angle = kp* error
                 angle = rc_utils.clamp(angle,-1,1)
-            else:
-                wall_follow()  
-                speed=0.7
         else:
-        #after we turn left, we have no reason to line follow since wall follow will work 
+            #after we turn left, we have no reason to line follow since wall follow will work 
+            #however, in case the camera temporarily misses both the green and blue, I wanted to ensure the car doesn't start wall following too early
             wall_follow()
-            speed=0.7
-        
-    print(state)
+            
+
         
     rc.drive.set_speed_angle(speed, angle) 
         
@@ -314,7 +348,7 @@ def update():
 
 def update_slow():
     global state
-    #print(state)
+    print(state)
     for marker in markers:
         #print(f"Marker ID: {marker.get_id()}")
         #print(f"Marker Corners: {marker.get_corners_aruco_format()}")
